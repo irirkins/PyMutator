@@ -18,4 +18,3 @@ class MutatorHelper(Protocol):
     def mutate(self) -> cst.CSTNode:
         """Should return a mutated version of the node."""
         ...
-        

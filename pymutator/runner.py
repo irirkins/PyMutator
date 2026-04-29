@@ -60,6 +60,3 @@ def run_tests(code: str, config: Config) -> Status:
     finally:
         config.original_file_path.write_text(temp_path.read_text())
         temp_path.unlink()
-        
-
-
