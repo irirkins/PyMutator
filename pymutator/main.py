@@ -65,7 +65,6 @@ def main() -> None:
         if not args.file_path or not args.test_path:
             print("Error: Specify the paths to the file and the tests, or use --config")
             sys.exit(1)
-
         file_abs = args.file_path.resolve()
         test_abs = args.test_path.resolve()
 
