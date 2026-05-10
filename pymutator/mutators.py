@@ -141,6 +141,23 @@ def is_good_type(node: cst.CSTNode) -> bool:
     return True
 
 
+comment_types = (
+    cst.SimpleStatementLine, 
+    cst.If, 
+    cst.For, 
+    cst.While, 
+    cst.FunctionDef, 
+    cst.ClassDef
+)
+
+
+def has_no_mutation(node: cst.CSTNode) -> bool:
+    return isinstance(node, comment_types) and \
+           hasattr(node, "trailing_whitespace") and \
+           node.trailing_whitespace.comment and \
+           "# no mutation" in node.trailing_whitespace.comment.value
+
+
 class Visitor(cst.CSTVisitor):
     """Class for visiting nodes, collecting metadata and counting "good" nodes."""
 
@@ -150,12 +167,26 @@ class Visitor(cst.CSTVisitor):
         super().__init__()
         self.counter = 0
         self.all_mutations = {}
+        self.skip = False
 
-    def on_leave(self, node: cst.CSTNode) -> None:
-        if is_good_type(node):
+    def catch_no_mutate(self, node: cst.CSTNode) -> None:
+        if has_no_mutation(node):
+            self.skip = True
+
+    def node_leave(self, node: cst.CSTNode) -> None:
+        if is_good_type(node) and not self.skip:
             self.counter += 1
             line_num = self.get_metadata(PositionProvider, node).start.line
             self.all_mutations[self.counter] = line_num
+
+    def line_leave(self, node: cst.CSTNode) -> None:
+        if has_no_mutation(node):
+            self.skip = False
+
+
+for node_type in mutation_types:
+    leave_name = f"leave_{node_type.__name__}"
+    setattr(Visitor, leave_name, Visitor.node_leave)
 
 
 class Transformer(cst.CSTTransformer):
@@ -165,11 +196,23 @@ class Transformer(cst.CSTTransformer):
         super().__init__()
         self.counter = 0
         self.target = target
+        self.skip = False
+
+    def line_visit(self, node: cst.CSTNode) -> bool:
+        if has_no_mutation(node):
+            self.skip = True
+
+        return True
+    
+    def line_leave(self, old_node: cst.CSTNode, new_node: cst.CSTNode) -> cst.CSTNode:
+        if has_no_mutation(old_node):
+            self.skip = False
+        return new_node
 
     def mutate_node(self, old_node: cst.CSTNode, new_node: cst.CSTNode) -> cst.CSTNode:
         """Generic handler for node mutation logic."""
 
-        if (is_good_type(old_node)):
+        if is_good_type(old_node) and not self.skip:
             self.counter += 1
 
             if self.counter == self.target:
@@ -180,5 +223,14 @@ class Transformer(cst.CSTTransformer):
 
 
 for node_type in mutation_types:
-    method_name = f"leave_{node_type.__name__}"
-    setattr(Transformer, method_name, Transformer.mutate_node)
+    leave_name = f"leave_{node_type.__name__}"
+    setattr(Transformer, leave_name, Transformer.mutate_node)
+
+
+for node_type in comment_types:
+    leave_name = f"leave_{node_type.__name__}"
+    visit_name = f"visit_{node_type.__name__}"
+    setattr(Visitor, visit_name, Visitor.catch_no_mutate)
+    setattr(Transformer, visit_name, Transformer.line_visit)
+    setattr(Visitor, leave_name, Visitor.line_leave)
+    setattr(Transformer, leave_name, Transformer.line_leave)
