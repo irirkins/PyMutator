@@ -14,7 +14,7 @@ def worker(args) -> MutationResult:
     source_code, config, target, line_num = args
 
     tree = cst.parse_module(source_code)
-    transformer = Transformer(target)
+    transformer = Transformer(target, config.enabled_mutations)
     mutant_tree = tree.visit(transformer)
 
     status = run_tests(mutant_tree.code, config)
@@ -30,8 +30,7 @@ def worker(args) -> MutationResult:
     diff = "\n".join(diff_list)
 
     return MutationResult(target, line_num, status, diff)
-    
-    
+
 
 def start_mutators_process(source_code: str, config: Config) -> List[MutationResult]:
     """
@@ -47,7 +46,7 @@ def start_mutators_process(source_code: str, config: Config) -> List[MutationRes
 
     tree = cst.parse_module(source_code)
 
-    visitor = Visitor()
+    visitor = Visitor(config.enabled_mutations)
     MetadataWrapper(tree).visit(visitor)
     max_mutant_cnt = visitor.counter
     lines_mutations = visitor.all_mutations
