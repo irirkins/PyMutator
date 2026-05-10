@@ -1,7 +1,7 @@
 import libcst as cst
 from libcst.metadata import PositionProvider
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, List
 
 
 mutation_types = (
@@ -125,14 +125,22 @@ helpers = {
 }
 
 
-def is_good_type(node: cst.CSTNode) -> bool:
+def is_good_type(node: cst.CSTNode, enabled_mutations: List[str]) -> bool:
     """Check should the node be mutated or not."""
+
+    node_type = type(node)
+    if node_type not in helpers:
+        return False
+
+    if enabled_mutations is not None:
+        if helpers[node_type].__name__ not in enabled_mutations:
+            return False
 
     if not isinstance(node, mutation_types):
         return False
 
     if isinstance(node, (cst.BinaryOperation, cst.ComparisonTarget, cst.BooleanOperation)):
-        helper_class = helpers[type(node)]
+        helper_class = helpers[node_type]
         return type(node.operator) in helper_class.get_rules()
 
     if isinstance(node, cst.Name):
@@ -154,7 +162,7 @@ comment_types = (
 def has_no_mutation(node: cst.CSTNode) -> bool:
     return isinstance(node, comment_types) and \
            hasattr(node, "trailing_whitespace") and \
-           node.trailing_whitespace.comment and \
+           node.trailing_whitespace.comment is not None and \
            "# no mutation" in node.trailing_whitespace.comment.value
 
 
@@ -163,18 +171,20 @@ class Visitor(cst.CSTVisitor):
 
     METADATA_DEPENDENCIES = (PositionProvider,)
 
-    def __init__(self) -> None:
+    def __init__(self, enabled_mutations: List[str]) -> None:
         super().__init__()
         self.counter = 0
         self.all_mutations = {}
         self.skip = False
+        self.enabled_mutations = enabled_mutations
+
 
     def catch_no_mutate(self, node: cst.CSTNode) -> None:
         if has_no_mutation(node):
             self.skip = True
 
     def node_leave(self, node: cst.CSTNode) -> None:
-        if is_good_type(node) and not self.skip:
+        if is_good_type(node, self.enabled_mutations) and not self.skip:
             self.counter += 1
             line_num = self.get_metadata(PositionProvider, node).start.line
             self.all_mutations[self.counter] = line_num
@@ -192,11 +202,12 @@ for node_type in mutation_types:
 class Transformer(cst.CSTTransformer):
     """Main transformer that applies exactly one mutation per pass."""
 
-    def __init__(self, target: int) -> None:
+    def __init__(self, target: int, enabled_mutations: List[str] = None) -> None:
         super().__init__()
         self.counter = 0
         self.target = target
         self.skip = False
+        self.enabled_mutations = enabled_mutations
 
     def line_visit(self, node: cst.CSTNode) -> bool:
         if has_no_mutation(node):
@@ -212,7 +223,7 @@ class Transformer(cst.CSTTransformer):
     def mutate_node(self, old_node: cst.CSTNode, new_node: cst.CSTNode) -> cst.CSTNode:
         """Generic handler for node mutation logic."""
 
-        if is_good_type(old_node) and not self.skip:
+        if is_good_type(old_node, self.enabled_mutations) and not self.skip:
             self.counter += 1
 
             if self.counter == self.target:
