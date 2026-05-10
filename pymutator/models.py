@@ -25,6 +25,7 @@ class MutationResult:
     number: int
     line: int
     status: Status
+    diff: str = ""
 
 
 class Config(BaseModel):
@@ -32,8 +33,11 @@ class Config(BaseModel):
 
     original_file_path: Path
     test_dir: Path
+    root_path: Path
     timeout: int = Field(default=5, gt=0)
-    mutant_cnt: int = Field(default=10, gt=0)
+    mutant_cnt: int = Field(default=10, ge=0)
+    jobs: int = Field(default=1, ge=1)
+    full_report: bool = Field(default=False)
 
     @field_validator("original_file_path")
     @classmethod
@@ -53,4 +57,12 @@ class Config(BaseModel):
         """Verify that the test directory exists and is a directory."""
         if not v.exists() or not v.is_dir():
             raise ValueError(f"Test directory is not found: {v}")
+        return v
+
+    @field_validator("root_path")
+    @classmethod
+    def check_root_exists(cls, v: Path) -> Path:
+        """Verify that the root directory exists and is a directory."""
+        if not v.exists() or not v.is_dir():
+            raise ValueError(f"Root directory is not found: {v}")
         return v
