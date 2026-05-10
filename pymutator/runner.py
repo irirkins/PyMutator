@@ -2,6 +2,8 @@ import subprocess
 import tempfile
 import os
 import shutil
+import psutil
+import time
 from .models import Config, Status
 from pathlib import Path
 
@@ -15,52 +17,7 @@ def run_tests(code: str, config: Config) -> Status:
 
     Returns:
         Status: The result of the mutation test (KILLED, SURVIVED, or TIMEOUT).
-    
 
-    original_code = config.original_file_path.read_text()
-
-    config.original_file_path.write_text(code)
-
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.bak', delete=False) as temp:
-        temp.write(original_code)
-        temp.flush()
-        temp_path = Path(temp.name)
-
-    try:
-        code_dir = str(config.original_file_path.parent)
-        test_dir = str(config.test_dir)
-        new_paths = [code_dir, test_dir]
-
-        env = os.environ.copy()
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-
-        current_pythonpath = env.get("PYTHONPATH", "")
-
-        if current_pythonpath:
-            env["PYTHONPATH"] = os.pathsep.join(new_paths) + os.pathsep + current_pythonpath
-        else:
-            env["PYTHONPATH"] = os.pathsep.join(new_paths)
-
-        result = subprocess.run(
-            ["pytest", "-q", "--no-header", config.test_dir],
-            capture_output=True,
-            cwd=str(config.original_file_path.parent),
-            text=True,
-            timeout=config.timeout,
-            env=env
-        )
-
-        if result.returncode == 0:
-            return Status.SURVIVED
-        else:
-            return Status.KILLED
-
-    except subprocess.TimeoutExpired:
-        return Status.TIMEOUT
-
-    finally:
-        config.original_file_path.write_text(temp_path.read_text())
-        temp_path.unlink()
     """
 
     rel_file = config.original_file_path.relative_to(config.root_path)
@@ -77,20 +34,39 @@ def run_tests(code: str, config: Config) -> Status:
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONPATH"] = str(Path(tmp_dir))
 
+        proc = None
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 ["pytest", "-q", "--no-header", "-x", str(Path(tmp_dir) / rel_test)],
                 cwd=str(Path(tmp_dir)),
                 env=env,
-                capture_output=True,
-                text=True,
-                timeout=config.timeout
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
 
-            if result.returncode == 0:
+            ps_proc = psutil.Process(proc.pid)
+            start_time = time.time()
+
+            while proc.poll() is None:
+                if time.time() - start_time > config.timeout:
+                    proc.kill()
+                    return Status.TIMEOUT
+
+                mem_usage = ps_proc.memory_info().rss
+                    
+                if mem_usage > 512 * 1024 * 1024:
+                    proc.kill()
+                    return Status.TIMEOUT
+                        
+                time.sleep(0.1)
+
+            if proc.returncode == 0:
                 return Status.SURVIVED
-            else:
-                return Status.KILLED
-        except subprocess.TimeoutExpired:
-            return Status.TIMEOUT
-    
+            return Status.KILLED
+
+        except Exception:
+            return Status.KILLED
+
+        finally:
+            if proc and proc.poll() is None:
+                proc.kill()
