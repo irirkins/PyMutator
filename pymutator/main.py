@@ -29,7 +29,6 @@ def main() -> None:
     The entry point to the application.
     Parses the arguments and starts the process.
     '''
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path)
     parser.add_argument("--root", "-r", type=Path)
