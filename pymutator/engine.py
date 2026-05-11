@@ -14,8 +14,9 @@ def worker(args) -> MutationResult:
     source_code, config, target, line_num = args
 
     tree = cst.parse_module(source_code)
+    wrapper = cst.MetadataWrapper(tree)
     transformer = Transformer(target, config.enabled_mutations)
-    mutant_tree = tree.visit(transformer)
+    mutant_tree = wrapper.visit(transformer)
 
     status = run_tests(mutant_tree.code, config)
 
@@ -43,6 +44,10 @@ def start_mutators_process(source_code: str, config: Config) -> List[MutationRes
     Returns:
         List[MutationResult]: A list of objects containing the result for each mutant.
     """
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
 
     tree = cst.parse_module(source_code)
 

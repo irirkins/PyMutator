@@ -1,7 +1,7 @@
 import libcst as cst
 from libcst.metadata import PositionProvider
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Set
 
 
 mutation_types = (
@@ -148,9 +148,7 @@ def is_good_type(node: cst.CSTNode, enabled_mutations: List[str]) -> bool:
 
     return True
 
-
-comment_types = (
-    cst.SimpleStatementLine, 
+complicated_comment_types = (
     cst.If, 
     cst.For, 
     cst.While, 
@@ -158,13 +156,24 @@ comment_types = (
     cst.ClassDef
 )
 
+comment_types = complicated_comment_types + (cst.SimpleStatementLine,)
+
 
 def has_no_mutation(node: cst.CSTNode) -> bool:
-    return isinstance(node, comment_types) and \
-           hasattr(node, "trailing_whitespace") and \
-           node.trailing_whitespace.comment is not None and \
-           "# no mutation" in node.trailing_whitespace.comment.value
+    if hasattr(node, "trailing_whitespace") and node.trailing_whitespace.comment:
+        if "# no mutation" in node.trailing_whitespace.comment.value:
+            return True
 
+    if isinstance(node, complicated_comment_types):
+        if hasattr(node.body, "header") and node.body.header.comment:
+            if "# no mutation" in node.body.header.comment.value:
+                return True
+                    
+    return False
+
+def get_node_line(visitor_or_transformer, node: cst.CSTNode) -> int:
+    """Helper for getting number of node`s line"""
+    return visitor_or_transformer.get_metadata(PositionProvider, node).start.line
 
 class Visitor(cst.CSTVisitor):
     """Class for visiting nodes, collecting metadata and counting "good" nodes."""
@@ -175,23 +184,20 @@ class Visitor(cst.CSTVisitor):
         super().__init__()
         self.counter = 0
         self.all_mutations = {}
-        self.skip = False
+        self.ignored_lines: Set[int] = set()
         self.enabled_mutations = enabled_mutations
 
 
-    def catch_no_mutate(self, node: cst.CSTNode) -> None:
+    def catch_no_mutate(self, node: cst.CSTNode) -> bool:
         if has_no_mutation(node):
-            self.skip = True
+            self.ignored_lines.add(get_node_line(self, node))
+        return True
 
     def node_leave(self, node: cst.CSTNode) -> None:
-        if is_good_type(node, self.enabled_mutations) and not self.skip:
+        if is_good_type(node, self.enabled_mutations) and get_node_line(self, node) not in self.ignored_lines:
             self.counter += 1
             line_num = self.get_metadata(PositionProvider, node).start.line
             self.all_mutations[self.counter] = line_num
-
-    def line_leave(self, node: cst.CSTNode) -> None:
-        if has_no_mutation(node):
-            self.skip = False
 
 
 for node_type in mutation_types:
@@ -201,29 +207,24 @@ for node_type in mutation_types:
 
 class Transformer(cst.CSTTransformer):
     """Main transformer that applies exactly one mutation per pass."""
+    METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, target: int, enabled_mutations: List[str] = None) -> None:
         super().__init__()
         self.counter = 0
         self.target = target
-        self.skip = False
+        self.ignored_lines: Set[int] = set()
         self.enabled_mutations = enabled_mutations
 
     def line_visit(self, node: cst.CSTNode) -> bool:
         if has_no_mutation(node):
-            self.skip = True
-
+            self.ignored_lines.add(get_node_line(self, node))
         return True
-    
-    def line_leave(self, old_node: cst.CSTNode, new_node: cst.CSTNode) -> cst.CSTNode:
-        if has_no_mutation(old_node):
-            self.skip = False
-        return new_node
 
     def mutate_node(self, old_node: cst.CSTNode, new_node: cst.CSTNode) -> cst.CSTNode:
         """Generic handler for node mutation logic."""
 
-        if is_good_type(old_node, self.enabled_mutations) and not self.skip:
+        if is_good_type(old_node, self.enabled_mutations) and get_node_line(self, old_node) not in self.ignored_lines:
             self.counter += 1
 
             if self.counter == self.target:
@@ -243,5 +244,3 @@ for node_type in comment_types:
     visit_name = f"visit_{node_type.__name__}"
     setattr(Visitor, visit_name, Visitor.catch_no_mutate)
     setattr(Transformer, visit_name, Transformer.line_visit)
-    setattr(Visitor, leave_name, Visitor.line_leave)
-    setattr(Transformer, leave_name, Transformer.line_leave)
