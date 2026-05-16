@@ -1,7 +1,7 @@
 import libcst as cst
 from libcst.metadata import PositionProvider
 from abc import ABC, abstractmethod
-from typing import Dict
+from typing import Dict, List, Set
 
 
 mutation_types = (
@@ -125,14 +125,22 @@ helpers = {
 }
 
 
-def is_good_type(node: cst.CSTNode) -> bool:
+def is_good_type(node: cst.CSTNode, enabled_mutations: List[str]) -> bool:
     """Check should the node be mutated or not."""
+
+    node_type = type(node)
+    if node_type not in helpers:
+        return False
+
+    if enabled_mutations is not None:
+        if helpers[node_type].__name__ not in enabled_mutations:
+            return False
 
     if not isinstance(node, mutation_types):
         return False
 
     if isinstance(node, (cst.BinaryOperation, cst.ComparisonTarget, cst.BooleanOperation)):
-        helper_class = helpers[type(node)]
+        helper_class = helpers[node_type]
         return type(node.operator) in helper_class.get_rules()
 
     if isinstance(node, cst.Name):
@@ -140,36 +148,83 @@ def is_good_type(node: cst.CSTNode) -> bool:
 
     return True
 
+complicated_comment_types = (
+    cst.If, 
+    cst.For, 
+    cst.While, 
+    cst.FunctionDef, 
+    cst.ClassDef
+)
+
+comment_types = complicated_comment_types + (cst.SimpleStatementLine,)
+
+
+def has_no_mutation(node: cst.CSTNode) -> bool:
+    if hasattr(node, "trailing_whitespace") and node.trailing_whitespace.comment:
+        if "# no mutation" in node.trailing_whitespace.comment.value:
+            return True
+
+    if isinstance(node, complicated_comment_types):
+        if hasattr(node.body, "header") and node.body.header.comment:
+            if "# no mutation" in node.body.header.comment.value:
+                return True
+                    
+    return False
+
+def get_node_line(visitor_or_transformer, node: cst.CSTNode) -> int:
+    """Helper for getting number of node`s line"""
+    return visitor_or_transformer.get_metadata(PositionProvider, node).start.line
 
 class Visitor(cst.CSTVisitor):
     """Class for visiting nodes, collecting metadata and counting "good" nodes."""
 
     METADATA_DEPENDENCIES = (PositionProvider,)
 
-    def __init__(self) -> None:
+    def __init__(self, enabled_mutations: List[str]) -> None:
         super().__init__()
         self.counter = 0
         self.all_mutations = {}
+        self.ignored_lines: Set[int] = set()
+        self.enabled_mutations = enabled_mutations
 
-    def on_leave(self, node: cst.CSTNode) -> None:
-        if is_good_type(node):
+
+    def catch_no_mutate(self, node: cst.CSTNode) -> bool:
+        if has_no_mutation(node):
+            self.ignored_lines.add(get_node_line(self, node))
+        return True
+
+    def node_leave(self, node: cst.CSTNode) -> None:
+        if is_good_type(node, self.enabled_mutations) and get_node_line(self, node) not in self.ignored_lines:
             self.counter += 1
             line_num = self.get_metadata(PositionProvider, node).start.line
             self.all_mutations[self.counter] = line_num
 
 
+for node_type in mutation_types:
+    leave_name = f"leave_{node_type.__name__}"
+    setattr(Visitor, leave_name, Visitor.node_leave)
+
+
 class Transformer(cst.CSTTransformer):
     """Main transformer that applies exactly one mutation per pass."""
+    METADATA_DEPENDENCIES = (PositionProvider,)
 
-    def __init__(self, target: int) -> None:
+    def __init__(self, target: int, enabled_mutations: List[str] = None) -> None:
         super().__init__()
         self.counter = 0
         self.target = target
+        self.ignored_lines: Set[int] = set()
+        self.enabled_mutations = enabled_mutations
+
+    def line_visit(self, node: cst.CSTNode) -> bool:
+        if has_no_mutation(node):
+            self.ignored_lines.add(get_node_line(self, node))
+        return True
 
     def mutate_node(self, old_node: cst.CSTNode, new_node: cst.CSTNode) -> cst.CSTNode:
         """Generic handler for node mutation logic."""
 
-        if (is_good_type(old_node)):
+        if is_good_type(old_node, self.enabled_mutations) and get_node_line(self, old_node) not in self.ignored_lines:
             self.counter += 1
 
             if self.counter == self.target:
@@ -180,5 +235,12 @@ class Transformer(cst.CSTTransformer):
 
 
 for node_type in mutation_types:
-    method_name = f"leave_{node_type.__name__}"
-    setattr(Transformer, method_name, Transformer.mutate_node)
+    leave_name = f"leave_{node_type.__name__}"
+    setattr(Transformer, leave_name, Transformer.mutate_node)
+
+
+for node_type in comment_types:
+    leave_name = f"leave_{node_type.__name__}"
+    visit_name = f"visit_{node_type.__name__}"
+    setattr(Visitor, visit_name, Visitor.catch_no_mutate)
+    setattr(Transformer, visit_name, Transformer.line_visit)

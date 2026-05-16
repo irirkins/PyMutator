@@ -1,11 +1,37 @@
+import multiprocessing as mp
 import libcst as cst
+import difflib
 import random
 from typing import List
 from rich.progress import Progress, BarColumn, TaskProgressColumn
 from libcst.metadata import MetadataWrapper
 from .mutators import Visitor, Transformer
-from .runner import run_tests, Status
+from .runner import run_tests
 from .models import MutationResult, Config
+
+def worker(args) -> MutationResult:
+    """ Worker for multiprocessing """
+    source_code, config, target, line_num = args
+
+    tree = cst.parse_module(source_code)
+    wrapper = cst.MetadataWrapper(tree)
+    transformer = Transformer(target, config.enabled_mutations)
+    mutant_tree = wrapper.visit(transformer)
+
+    status = run_tests(mutant_tree.code, config)
+
+    diff_list = list(difflib.unified_diff(
+        source_code.splitlines(),
+        mutant_tree.code.splitlines(),
+        fromfile="original",
+        tofile=f"mutant_{target}",
+        n=0
+    ))
+
+    diff = "\n".join(diff_list)
+
+    return MutationResult(target, line_num, status, diff)
+
 
 def start_mutators_process(source_code: str, config: Config) -> List[MutationResult]:
     """
@@ -18,10 +44,14 @@ def start_mutators_process(source_code: str, config: Config) -> List[MutationRes
     Returns:
         List[MutationResult]: A list of objects containing the result for each mutant.
     """
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
 
     tree = cst.parse_module(source_code)
 
-    visitor = Visitor()
+    visitor = Visitor(config.enabled_mutations)
     MetadataWrapper(tree).visit(visitor)
     max_mutant_cnt = visitor.counter
     lines_mutations = visitor.all_mutations
@@ -34,14 +64,23 @@ def start_mutators_process(source_code: str, config: Config) -> List[MutationRes
     targets = random.sample(range(1, max_mutant_cnt + 1), mutant_cnt)
     targets.sort()
 
-    with Progress(BarColumn(), TaskProgressColumn()) as progress:
-        task_id = progress.add_task("Testing...", total=len(targets))
+    if config.jobs <= 1:
+        with Progress(BarColumn(), TaskProgressColumn()) as progress:
+            task_id = progress.add_task("Testing...", total=len(targets))
 
-        for target in targets:
-            transformer = Transformer(target)
-            mutant_tree = tree.visit(transformer)
-            status = run_tests(mutant_tree.code, config)
-            results.append(MutationResult(target, lines_mutations[target], status))
-            progress.advance(task_id)
+            for target in targets:
+                results.append(worker((source_code, config, target, lines_mutations[target])))
+                progress.advance(task_id)
+
+    else:
+        worker_args = [(source_code, config, target, lines_mutations[target]) for target in targets]
+
+        with Progress(BarColumn(), TaskProgressColumn()) as progress:
+            task_id = progress.add_task("Testing multiprocessing...", total=len(targets))
+
+            with mp.Pool(processes=config.jobs) as pool:
+                for res in pool.imap_unordered(worker, worker_args):
+                    results.append(res)
+                    progress.advance(task_id)
 
     return results

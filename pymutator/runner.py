@@ -1,6 +1,9 @@
 import subprocess
 import tempfile
 import os
+import shutil
+import psutil
+import time
 from .models import Config, Status
 from pathlib import Path
 
@@ -14,49 +17,56 @@ def run_tests(code: str, config: Config) -> Status:
 
     Returns:
         Status: The result of the mutation test (KILLED, SURVIVED, or TIMEOUT).
+
     """
 
-    original_code = config.original_file_path.read_text()
+    rel_file = config.original_file_path.relative_to(config.root_path)
+    rel_test = config.test_dir.relative_to(config.root_path)
 
-    config.original_file_path.write_text(code)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        shutil.copytree(config.root_path, Path(tmp_dir), dirs_exist_ok=True, 
+                        ignore=shutil.ignore_patterns('__pycache__', '.pytest_cache', 'venv', '.git'))
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.bak', delete=False) as temp:
-        temp.write(original_code)
-        temp.flush()
-        temp_path = Path(temp.name)
-
-    try:
-        code_dir = str(config.original_file_path.parent)
-        test_dir = str(config.test_dir)
-        new_paths = [code_dir, test_dir]
+        mutant_path = Path(tmp_dir) / rel_file
+        mutant_path.write_text(code)
 
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONPATH"] = str(Path(tmp_dir))
 
-        current_pythonpath = env.get("PYTHONPATH", "")
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["pytest", "-q", "--no-header", "-x", str(Path(tmp_dir) / rel_test)],
+                cwd=str(Path(tmp_dir)),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
 
-        if current_pythonpath:
-            env["PYTHONPATH"] = os.pathsep.join(new_paths) + os.pathsep + current_pythonpath
-        else:
-            env["PYTHONPATH"] = os.pathsep.join(new_paths)
+            ps_proc = psutil.Process(proc.pid)
+            start_time = time.time()
 
-        result = subprocess.run(
-            ["pytest", config.test_dir],
-            capture_output=True,
-            cwd=str(config.original_file_path.parent),
-            text=True,
-            timeout=config.timeout,
-            env=env
-        )
+            while proc.poll() is None:
+                if time.time() - start_time > config.timeout:
+                    proc.kill()
+                    return Status.TIMEOUT
 
-        if result.returncode == 0:
-            return Status.SURVIVED
-        else:
+                mem_usage = ps_proc.memory_info().rss
+                    
+                if mem_usage > 512 * 1024 * 1024:
+                    proc.kill()
+                    return Status.TIMEOUT
+                        
+                time.sleep(0.1)
+
+            if proc.returncode == 0:
+                return Status.SURVIVED
             return Status.KILLED
 
-    except subprocess.TimeoutExpired:
-        return Status.TIMEOUT
+        except Exception:
+            return Status.KILLED
 
-    finally:
-        config.original_file_path.write_text(temp_path.read_text())
-        temp_path.unlink()
+        finally:
+            if proc and proc.poll() is None:
+                proc.kill()
